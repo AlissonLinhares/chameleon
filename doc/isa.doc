@@ -1,0 +1,45 @@
+Status register <status>
+- Flags: OF,SF,ZF,CF,PF
+- OF: integer overflow.
+- SF: signed result.
+- ZF: zero result.
+- CF: carry do bit mais significativo.
+- PF: paritidade dos dois ultimos bits.
+
+LOADS             <reg> ;load the status register into <reg>.
+STORS             <reg> ;store <reg> content into the status register.
+
+LOAD              <imm/reg>, <imm/reg>
+STOR              <imm/reg>, <imm/reg>
+MOV               <reg>,<reg/imm>
+
+
+SYS               <imm> ;syscall
+
+**   exponentiation,  numeric ** integer,  result numeric
+abs  absolute value,  abs numeric,  result numeric
+not  complement,      not logic or boolean,  result same
+
+*    multiplication,  numeric * numeric,  result numeric
+/    division,        numeric / numeric,  result numeric
+mod  modulo,          integer mod integer,  result integer
+rem  remainder,       integer rem integer,  result integer
+
++    unary plus,      + numeric,  result numeric
+-    unary minus,     - numeric,  result numeric
+
++    addition,        numeric + numeric,  result numeric
+-    subtraction,     numeric - numeric,  result numeric
+
+sll  shift left logical,     logical array sll integer,  result same
+srl  shift right logical,    logical array srl integer,  result same
+sla  shift left arithmetic,  logical array sla integer,  result same
+sra  shift right arithmetic, logical array sra integer,  result same
+rol  rotate left,            logical array rol integer,  result same
+ror  rotate right,           logical array ror integer,  result same
+and  logical and,                logical array or boolean,  result is same
+or   logical or,                 logical array or boolean,  result is same
+nand logical complement of and,  logical array or boolean,  result is same
+nor  logical complement of or,   logical array or boolean,  result is same
+xor  logical exclusive or,       logical array or boolean,  result is same
+xnor logical complement of exclusive or,  logical array or boolean,  result is same

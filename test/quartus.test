@@ -1,0 +1,909 @@
+--           [ 31|30 29|28 27|26 25 24 23 22 21|20 19 18 17 16|15 14 13 12 11|  10 9 8 7 6  | 5 4 3 2 1 0  ]
+-- Format G0 [  V|  G  |  U  |   Opcode (6)    |                     Immediate (21)                        ]
+-- Format G1 [  V|  G  |  U  |   Opcode (6)    | Register (5) |                   Immediate(16)            ]
+-- Format G2 [  V|  G  |  U  |   Opcode (6)    | Register (5) | Register (5) |           Immediate(11)     ]
+-- Format G3 [  V|  G  |  U  |   Opcode (6)    | Register (5) | Register (5) | Register (5) | RESERVED (6) ]
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+use ieee.math_real.all;
+
+package isa is
+	subtype t_opcode        is std_logic_vector(5 downto 0);  -- 64 addressable operations.
+	subtype t_operation     is std_logic_vector(31 downto 21);
+	subtype t_status        is std_logic_vector(4 downto 0);  -- 5 Flags (CSZOP)
+	subtype t_register      is std_logic_vector(7 downto 0); -- 64 bit word.
+	subtype t_rindex        is std_logic_vector(4 downto 0);  -- 32 addressable registers.
+	subtype t_instruction   is std_logic_vector(31 downto 0); -- 32 bit instruction size.
+
+	type t_register_bank    is array(0 to 63) of t_register;
+
+	subtype INST_IMM11_RANGE  is natural range 10 downto 0;
+	subtype INST_IMM16_RANGE  is natural range 15 downto 0;
+	subtype INST_IMM21_RANGE  is natural range 20 downto 0;
+	subtype INST_RESE_RANGE   is natural range  5 downto 0;
+	subtype INST_REG0_RANGE   is natural range 10 downto 6;
+	subtype INST_REG1_RANGE   is natural range 15 downto 11;
+	subtype INST_REG2_RANGE   is natural range 20 downto 16;
+	subtype INST_OPCODE_RANGE is natural range 26 downto 21;
+	subtype INST_UFLAG_RANGE  is natural range 28 downto 27;
+	subtype INST_GFLAG_RANGE  is natural range 30 downto 29;
+	subtype INST_VFLAG_RANGE  is natural range 31 downto 31;
+
+	constant G0_FORMAT     : std_logic_vector(INST_GFLAG_RANGE) := "00";
+	constant G1_FORMAT     : std_logic_vector(INST_GFLAG_RANGE) := "01";
+	constant G2_FORMAT     : std_logic_vector(INST_GFLAG_RANGE) := "10";
+	constant G3_FORMAT     : std_logic_vector(INST_GFLAG_RANGE) := "11";
+
+	constant ULA           : std_logic_vector(INST_UFLAG_RANGE) := "00";
+	constant LSU           : std_logic_vector(INST_UFLAG_RANGE) := "01";
+	constant SU            : std_logic_vector(INST_UFLAG_RANGE) := "10";
+	constant FPU           : std_logic_vector(INST_UFLAG_RANGE) := "11";
+
+	constant GPR_BASE_LEN   : integer := 3;                 -- 2^6 = 64 bits
+	constant GPR_WORD       : integer := 2**GPR_BASE_LEN;   -- 64 bit half word.
+	constant GPR_HALF_WORD  : integer := GPR_WORD / 2;      -- 32 bit half word.
+
+	constant MAX_UINT       : t_register := (others => '1');
+	constant MIN_UINT       : t_register := (others => '0');
+	constant MIN_INT        : t_register := (t_register'left => '1', others => '0');
+	constant MAX_INT        : t_register := (t_register'left => '0', others => '1');
+	constant ONE            : t_register := (t_register'right => '1',others => '0');
+	constant ZERO           : t_register := MIN_UINT;
+
+	constant GPR0           : t_rindex := "00000";
+	constant GPR1           : t_rindex := "00001";
+	constant GPR2           : t_rindex := "00010";
+	constant GPR3           : t_rindex := "00011";
+	constant GPR4           : t_rindex := "00100";
+	constant GPR5           : t_rindex := "00101";
+	constant GPR6           : t_rindex := "00110";
+	constant GPR7           : t_rindex := "00111";
+	constant GPR8           : t_rindex := "01000";
+	constant GPR9           : t_rindex := "01001";
+	constant GPR10          : t_rindex := "01010";
+	constant GPR11          : t_rindex := "01011";
+	constant GPR12          : t_rindex := "01100";
+	constant GPR13          : t_rindex := "01101";
+	constant GPR14          : t_rindex := "01110";
+	constant GPR15          : t_rindex := "01111";
+	constant GPR16          : t_rindex := "10000";
+	constant GPR17          : t_rindex := "10001";
+	constant GPR18          : t_rindex := "10010";
+	constant GPR19          : t_rindex := "10011";
+	constant GPR20          : t_rindex := "10100";
+	constant GPR21          : t_rindex := "10101";
+	constant GPR22          : t_rindex := "10110";
+	constant GPR23          : t_rindex := "10111";
+	constant GPR24          : t_rindex := "11000";
+	constant GPR25          : t_rindex := "11001";
+	constant GPR26          : t_rindex := "11010";
+	constant GPR27          : t_rindex := "11011";
+	constant GPR28          : t_rindex := "11100";
+	constant GPR29          : t_rindex := "11101";
+	constant GPR30          : t_rindex := "11110";
+	constant GPR31          : t_rindex := "11111";
+
+	constant PC             : t_rindex := GPR31; -- Programming counter.
+	constant IR             : t_rindex := GPR30; -- Instruction register.
+	constant MAR            : t_rindex := GPR29; -- Memory address.
+	constant STP            : t_rindex := GPR28; -- Stack point.
+
+	constant ALU_FLAG_O     : integer := 0;  -- Overflow flag.
+	constant ALU_FLAG_S     : integer := 1;  -- Signed result.
+	constant ALU_FLAG_Z     : integer := 2;  -- Zero result.
+	constant ALU_FLAG_C     : integer := 3;  -- Carry bit.
+	constant ALU_FLAG_P     : integer := 4;  -- Parity flag.
+
+	constant ALU_CMP        : t_opcode := "000000"; --   -  ,<reg>,<reg>  ; Compare two values and changes the status registers.
+	constant ALU_AND        : t_opcode := "000001"; -- <reg>,<reg>,<reg>  ; Logical "and".
+	constant ALU_NAND       : t_opcode := "000010"; -- <reg>,<reg>,<reg>  ; Logical complement of "and".
+	constant ALU_OR         : t_opcode := "000011"; -- <reg>,<reg>,<reg>  ; Logical "or".
+	constant ALU_NOR        : t_opcode := "000100"; -- <reg>,<reg>,<reg>  ; Logical complement of "or".
+	constant ALU_NOT        : t_opcode := "000101"; -- <reg>,<reg>,  -    ; Complement.
+	constant ALU_XOR        : t_opcode := "000110"; -- <reg>,<reg>,<reg>  ; Logical exclusive "or".
+	constant ALU_XNOR       : t_opcode := "000111"; -- <reg>,<reg>,<reg>  ; Logical complement of exclusive "or".
+	constant ALU_SHL        : t_opcode := "001000"; -- <reg>,<reg>,<reg>  ; Signed left shift.
+	constant ALU_SHR        : t_opcode := "001001"; -- <reg>,<reg>,<reg>  ; Signed shift right.
+	constant ALU_ROL        : t_opcode := "001010"; -- <reg>,<reg>,<reg>  ; Rotate left.
+	constant ALU_ROR        : t_opcode := "001011"; -- <reg>,<reg>,<reg>  ; Rotate right.
+	constant ALU_NEG        : t_opcode := "001100"; -- <reg>,<reg>,  -    ; Negate number.
+	constant ALU_ADD        : t_opcode := "001101"; -- <reg>,<reg>,<reg>  ; Signed addition.
+	constant ALU_SUB        : t_opcode := "001110"; -- <reg>,<reg>,<reg>  ; Signed subtraction.
+	constant ALU_MUL        : t_opcode := "001111"; -- <reg>,<reg>,<reg>  ; Signed multiplication.
+	constant ALU_MULU       : t_opcode := "010000"; -- <reg>,<reg>,<reg>  ; Unsigned multiplication.
+	constant ALU_DIV        : t_opcode := "010001"; -- <reg>,<reg>,<reg>  ; Signed division.
+	constant ALU_DIVU       : t_opcode := "010010"; -- <reg>,<reg>,<reg>  ; Unsigned division.
+	constant ALU_MOD        : t_opcode := "010011"; -- <reg>,<reg>,<reg>  ; Division remainder.
+	constant ALU_ABS        : t_opcode := "010100"; -- <reg>,<reg>,  -    ; Absolute value.
+	constant ALU_MOV        : t_opcode := "010101"; -- <reg>,<reg>,  -    ; Move data.
+	constant ALU_MOVE       : t_opcode := "010110"; -- <reg>,<reg>,  -    ; Move data if zero/equal.       (Z == 1)
+	constant ALU_MOVNE      : t_opcode := "010111"; -- <reg>,<reg>,  -    ; Move data if not zero/equal.   (Z == 0)
+	constant ALU_MOVS       : t_opcode := "011000"; -- <reg>,<reg>,  -    ; Move data if signed.           (S == 1)           (signed)
+	constant ALU_MOVNS      : t_opcode := "011001"; -- <reg>,<reg>,  -    ; Move data if not signed.       (S == 0)
+	constant ALU_MOVO       : t_opcode := "011010"; -- <reg>,<reg>,  -    ; Move data if overflow.         (O == 1)           (signed)
+	constant ALU_MOVNO      : t_opcode := "011011"; -- <reg>,<reg>,  -    ; Move data if not overflow.     (O == 0)           (signed)
+	constant ALU_MOVP       : t_opcode := "011100"; -- <reg>,<reg>,  -    ; Move data if parity.           (P == 1)
+	constant ALU_MOVNP      : t_opcode := "011101"; -- <reg>,<reg>,  -    ; Move data if no parity.        (P == 0)
+	constant ALU_MOVA       : t_opcode := "011110"; -- <reg>,<reg>,  -    ; Move data if above.            (C == 0 && Z == 0)
+	constant ALU_MOVBE      : t_opcode := "111111"; -- <reg>,<reg>,  -    ; Move data if below.            (C == 1 || Z == 1)
+	constant ALU_MOVAE      : t_opcode := "100000"; -- <reg>,<reg>,  -    ; Move data if above equal.      (C == 0)
+	constant ALU_MOVB       : t_opcode := "100001"; -- <reg>,<reg>,  -    ; Move data if below.            (C == 1)
+	constant ALU_MOVG       : t_opcode := "100010"; -- <reg>,<reg>,  -    ; Move data if greater.          (Z == 0 && S == O) (signed)
+	constant ALU_MOVLE      : t_opcode := "100011"; -- <reg>,<reg>,  -    ; Move data if less or equal.    (Z == 1 || S != O) (signed)
+	constant ALU_MOVGE      : t_opcode := "100100"; -- <reg>,<reg>,  -    ; Move data if greater or equal. (S == O)           (signed)
+	constant ALU_MOVL       : t_opcode := "100101"; -- <reg>,<reg>,  -    ; Move data if less.             (S != O)           (signed)
+	constant ALU_LOADS      : t_opcode := "100110"; -- <reg>,  -  ,  -    ; Load the status register.
+	constant ALU_STORS      : t_opcode := "100111"; --   -  ,<reg>,  -    ; Store the data into the status register.
+	constant ALU_NOP        : t_opcode := "111111";
+
+	constant LSU_LOAD       : t_opcode := "000000"; -- <reg>,<reg>,  -    ; Load data from memory.
+	constant LSU_STORE      : t_opcode := "000001"; -- <reg>,<reg>,  -    ; Store data into memory.
+
+	constant SU_SYS         : t_opcode := "000000"; -- <reg>,<reg>,  -    ; Syscall.
+
+	constant OP_SYS        : t_operation := "0" & SU  & G2_FORMAT & SU_SYS   ; -- <reg>,<reg>,  -    ; Syscall.
+	constant OP_LOAD       : t_operation := "0" & LSU & G2_FORMAT & LSU_LOAD ; -- <reg>,<reg>,  -    ; Load data from memory.
+	constant OP_STORE      : t_operation := "0" & LSU & G2_FORMAT & LSU_STORE; -- <reg>,<reg>,  -    ; Store data into memory.
+	constant OP_CMP        : t_operation := "0" & ULA & G3_FORMAT & ALU_CMP  ; --   0  ,<reg>,<reg>  ; Compare two values and changes the status registers.
+	constant OP_AND        : t_operation := "0" & ULA & G3_FORMAT & ALU_AND  ; -- <reg>,<reg>,<reg>  ; Logical "and".
+	constant OP_NAND       : t_operation := "0" & ULA & G3_FORMAT & ALU_NAND ; -- <reg>,<reg>,<reg>  ; Logical complement of "and".
+	constant OP_OR         : t_operation := "0" & ULA & G3_FORMAT & ALU_OR   ; -- <reg>,<reg>,<reg>  ; Logical "or".
+	constant OP_NOR        : t_operation := "0" & ULA & G3_FORMAT & ALU_NOR  ; -- <reg>,<reg>,<reg>  ; Logical complement of "or".
+	constant OP_NOT        : t_operation := "0" & ULA & G3_FORMAT & ALU_NOT  ; -- <reg>,<reg>,  -    ; Complement.
+	constant OP_XOR        : t_operation := "0" & ULA & G3_FORMAT & ALU_XOR  ; -- <reg>,<reg>,<reg>  ; Logical exclusive "or".
+	constant OP_XNOR       : t_operation := "0" & ULA & G3_FORMAT & ALU_XNOR ; -- <reg>,<reg>,<reg>  ; Logical complement of exclusive "or".
+	constant OP_SHL        : t_operation := "0" & ULA & G3_FORMAT & ALU_SHL  ; -- <reg>,<reg>,<reg>  ; Signed left shift.
+	constant OP_SHR        : t_operation := "0" & ULA & G3_FORMAT & ALU_SHR  ; -- <reg>,<reg>,<reg>  ; Signed shift right.
+	constant OP_ROL        : t_operation := "0" & ULA & G3_FORMAT & ALU_ROL  ; -- <reg>,<reg>,<reg>  ; Rotate left.
+	constant OP_ROR        : t_operation := "0" & ULA & G3_FORMAT & ALU_ROR  ; -- <reg>,<reg>,<reg>  ; Rotate right.
+	constant OP_NEG        : t_operation := "0" & ULA & G3_FORMAT & ALU_NEG  ; -- <reg>,<reg>,<reg>  ; Negate number.
+	constant OP_ADD        : t_operation := "0" & ULA & G3_FORMAT & ALU_ADD  ; -- <reg>,<reg>,<reg>  ; Signed addition.
+	constant OP_SUB        : t_operation := "0" & ULA & G3_FORMAT & ALU_SUB  ; -- <reg>,<reg>,<reg>  ; Signed subtraction.
+	constant OP_MUL        : t_operation := "0" & ULA & G3_FORMAT & ALU_MUL  ; -- <reg>,<reg>,<reg>  ; Signed multiplication.
+	constant OP_MULU       : t_operation := "0" & ULA & G3_FORMAT & ALU_MULU ; -- <reg>,<reg>,<reg>  ; Unsigned multiplication.
+	constant OP_DIV        : t_operation := "0" & ULA & G3_FORMAT & ALU_DIV  ; -- <reg>,<reg>,<reg>  ; Signed division.
+	constant OP_DIVU       : t_operation := "0" & ULA & G3_FORMAT & ALU_DIVU ; -- <reg>,<reg>,<reg>  ; Unsigned division.
+	constant OP_MOD        : t_operation := "0" & ULA & G3_FORMAT & ALU_MOD  ; -- <reg>,<reg>,<reg>  ; Division remainder.
+	constant OP_ABS        : t_operation := "0" & ULA & G2_FORMAT & ALU_ABS  ; -- <reg>,<reg>,  -    ; Absolute value.
+	constant OP_MOV        : t_operation := "0" & ULA & G2_FORMAT & ALU_MOV  ; -- <reg>,<reg>,  -    ; Move data.
+	constant OP_MOVE       : t_operation := "0" & ULA & G2_FORMAT & ALU_MOVE ; -- <reg>,<reg>,  -    ; Move data if zero/equal.       (Z == 1)
+	constant OP_MOVNE      : t_operation := "0" & ULA & G2_FORMAT & ALU_MOVNE; -- <reg>,<reg>,  -    ; Move data if not zero/equal.   (Z == 0)
+	constant OP_MOVS       : t_operation := "0" & ULA & G2_FORMAT & ALU_MOVS ; -- <reg>,<reg>,  -    ; Move data if signed.           (S == 1)           (signed)
+	constant OP_MOVNS      : t_operation := "0" & ULA & G2_FORMAT & ALU_MOVNS; -- <reg>,<reg>,  -    ; Move data if not signed.       (S == 0)
+	constant OP_MOVO       : t_operation := "0" & ULA & G2_FORMAT & ALU_MOVO ; -- <reg>,<reg>,  -    ; Move data if overflow.         (O == 1)           (signed)
+	constant OP_MOVNO      : t_operation := "0" & ULA & G2_FORMAT & ALU_MOVNO; -- <reg>,<reg>,  -    ; Move data if not overflow.     (O == 0)           (signed)
+	constant OP_MOVP       : t_operation := "0" & ULA & G2_FORMAT & ALU_MOVP ; -- <reg>,<reg>,  -    ; Move data if parity.           (P == 1)
+	constant OP_MOVNP      : t_operation := "0" & ULA & G2_FORMAT & ALU_MOVNP; -- <reg>,<reg>,  -    ; Move data if no parity.        (P == 0)
+	constant OP_MOVA       : t_operation := "0" & ULA & G2_FORMAT & ALU_MOVA ; -- <reg>,<reg>,  -    ; Move data if above.            (C == 0 && Z == 0)
+	constant OP_MOVBE      : t_operation := "0" & ULA & G2_FORMAT & ALU_MOVBE; -- <reg>,<reg>,  -    ; Move data if below.            (C == 1 || Z == 1)
+	constant OP_MOVAE      : t_operation := "0" & ULA & G2_FORMAT & ALU_MOVAE; -- <reg>,<reg>,  -    ; Move data if above equal.      (C == 0)
+	constant OP_MOVB       : t_operation := "0" & ULA & G2_FORMAT & ALU_MOVB ; -- <reg>,<reg>,  -    ; Move data if below.            (C == 1)
+	constant OP_MOVG       : t_operation := "0" & ULA & G2_FORMAT & ALU_MOVG ; -- <reg>,<reg>,  -    ; Move data if greater.          (Z == 0 && S == O) (signed)
+	constant OP_MOVLE      : t_operation := "0" & ULA & G2_FORMAT & ALU_MOVLE; -- <reg>,<reg>,  -    ; Move data if less or equal.    (Z == 1 || S != O) (signed)
+	constant OP_MOVGE      : t_operation := "0" & ULA & G2_FORMAT & ALU_MOVGE; -- <reg>,<reg>,  -    ; Move data if greater or equal. (S == O)           (signed)
+	constant OP_MOVL       : t_operation := "0" & ULA & G2_FORMAT & ALU_MOVL ; -- <reg>,<reg>,  -    ; Move data if less.             (S != O)           (signed)
+	constant OP_LOADS      : t_operation := "0" & ULA & G1_FORMAT & ALU_LOADS; -- <reg>,  -  ,  -    ; Load the status register.
+	constant OP_STORS      : t_operation := "0" & ULA & G2_FORMAT & ALU_STORS; --   0  ,<reg>,  -    ; Store the data into the status register.
+	constant OP_NOP        : t_operation := "0" & ULA & G0_FORMAT & ALU_NOP  ; --   -  ,  -  ,  -    ; NOP.
+	constant OP_SYS_I      : t_operation := "0" & SU  & G1_FORMAT & SU_SYS   ; -- <reg>,<imm16>      ; Syscall.
+	constant OP_LOAD_I     : t_operation := "0" & LSU & G1_FORMAT & LSU_LOAD ; -- <reg>,<imm16>      ; Load data from memory.
+	constant OP_STORE_I    : t_operation := "0" & LSU & G1_FORMAT & LSU_STORE; -- <reg>,<imm16>      ; Store data into memory.
+	constant OP_CMP_I      : t_operation := "0" & ULA & G2_FORMAT & ALU_CMP  ; --   0  ,<reg>,<imm11>; Compare two values and changes the status registers.
+	constant OP_AND_I      : t_operation := "0" & ULA & G2_FORMAT & ALU_AND  ; -- <reg>,<reg>,<imm11>; Logical "and".
+	constant OP_NAND_I     : t_operation := "0" & ULA & G2_FORMAT & ALU_NAND ; -- <reg>,<reg>,<imm11>; Logical complement of "and".
+	constant OP_OR_I       : t_operation := "0" & ULA & G2_FORMAT & ALU_OR   ; -- <reg>,<reg>,<imm11>; Logical "or".
+	constant OP_NOR_I      : t_operation := "0" & ULA & G2_FORMAT & ALU_NOR  ; -- <reg>,<reg>,<imm11>; Logical complement of "or".
+	constant OP_NOT_I      : t_operation := "0" & ULA & G1_FORMAT & ALU_NOT  ; -- <reg>,<imm16>      ; Complement.
+	constant OP_XOR_I      : t_operation := "0" & ULA & G3_FORMAT & ALU_XOR  ; -- <reg>,<reg>,<imm11>; Logical exclusive "or".
+	constant OP_XNOR_I     : t_operation := "0" & ULA & G3_FORMAT & ALU_XNOR ; -- <reg>,<reg>,<imm11>; Logical complement of exclusive "or".
+	constant OP_SHL_I      : t_operation := "0" & ULA & G3_FORMAT & ALU_SHL  ; -- <reg>,<reg>,<imm11>; Signed left shift.
+	constant OP_SHR_I      : t_operation := "0" & ULA & G3_FORMAT & ALU_SHR  ; -- <reg>,<reg>,<imm11>; Signed shift right.
+	constant OP_ROL_I      : t_operation := "0" & ULA & G3_FORMAT & ALU_ROL  ; -- <reg>,<reg>,<imm11>; Rotate left.
+	constant OP_ROR_I      : t_operation := "0" & ULA & G3_FORMAT & ALU_ROR  ; -- <reg>,<reg>,<imm11>; Rotate right.
+	constant OP_NEG_I      : t_operation := "0" & ULA & G3_FORMAT & ALU_NEG  ; -- <reg>,<reg>,<imm11>; Negate number.
+	constant OP_ADD_I      : t_operation := "0" & ULA & G3_FORMAT & ALU_ADD  ; -- <reg>,<reg>,<imm11>; Signed addition.
+	constant OP_SUB_I      : t_operation := "0" & ULA & G3_FORMAT & ALU_SUB  ; -- <reg>,<reg>,<imm11>; Signed subtraction.
+	constant OP_MUL_I      : t_operation := "0" & ULA & G3_FORMAT & ALU_MUL  ; -- <reg>,<reg>,<imm11>; Signed multiplication.
+	constant OP_MULU_I     : t_operation := "0" & ULA & G3_FORMAT & ALU_MULU ; -- <reg>,<reg>,<imm11>; Unsigned multiplication.
+	constant OP_DIV_I      : t_operation := "0" & ULA & G3_FORMAT & ALU_DIV  ; -- <reg>,<reg>,<imm11>; Signed division.
+	constant OP_DIVU_I     : t_operation := "0" & ULA & G3_FORMAT & ALU_DIVU ; -- <reg>,<reg>,<imm11>; Unsigned division.
+	constant OP_MOD_I      : t_operation := "0" & ULA & G3_FORMAT & ALU_MOD  ; -- <reg>,<reg>,<imm11>; Division remainder.
+	constant OP_ABS_I      : t_operation := "0" & ULA & G1_FORMAT & ALU_ABS  ; -- <reg>,<imm16>      ; Absolute value.
+	constant OP_MOV_I      : t_operation := "0" & ULA & G1_FORMAT & ALU_MOV  ; -- <reg>,<imm16>      ; Move data.
+	constant OP_MOVE_I     : t_operation := "0" & ULA & G1_FORMAT & ALU_MOVE ; -- <reg>,<imm16>      ; Move data if zero/equal.       (Z == 1)
+	constant OP_MOVNE_I    : t_operation := "0" & ULA & G1_FORMAT & ALU_MOVNE; -- <reg>,<imm16>      ; Move data if not zero/equal.   (Z == 0)
+	constant OP_MOVS_I     : t_operation := "0" & ULA & G1_FORMAT & ALU_MOVS ; -- <reg>,<imm16>      ; Move data if signed.           (S == 1)           (signed)
+	constant OP_MOVNS_I    : t_operation := "0" & ULA & G1_FORMAT & ALU_MOVNS; -- <reg>,<imm16>      ; Move data if not signed.       (S == 0)
+	constant OP_MOVO_I     : t_operation := "0" & ULA & G1_FORMAT & ALU_MOVO ; -- <reg>,<imm16>      ; Move data if overflow.         (O == 1)           (signed)
+	constant OP_MOVNO_I    : t_operation := "0" & ULA & G1_FORMAT & ALU_MOVNO; -- <reg>,<imm16>      ; Move data if not overflow.     (O == 0)           (signed)
+	constant OP_MOVP_I     : t_operation := "0" & ULA & G1_FORMAT & ALU_MOVP ; -- <reg>,<imm16>      ; Move data if parity.           (P == 1)
+	constant OP_MOVNP_I    : t_operation := "0" & ULA & G1_FORMAT & ALU_MOVNP; -- <reg>,<imm16>      ; Move data if no parity.        (P == 0)
+	constant OP_MOVA_I     : t_operation := "0" & ULA & G1_FORMAT & ALU_MOVA ; -- <reg>,<imm16>      ; Move data if above.            (C == 0 && Z == 0)
+	constant OP_MOVBE_I    : t_operation := "0" & ULA & G1_FORMAT & ALU_MOVBE; -- <reg>,<imm16>      ; Move data if below.            (C == 1 || Z == 1)
+	constant OP_MOVAE_I    : t_operation := "0" & ULA & G1_FORMAT & ALU_MOVAE; -- <reg>,<imm16>      ; Move data if above equal.      (C == 0)
+	constant OP_MOVB_I     : t_operation := "0" & ULA & G1_FORMAT & ALU_MOVB ; -- <reg>,<imm16>      ; Move data if below.            (C == 1)
+	constant OP_MOVG_I     : t_operation := "0" & ULA & G1_FORMAT & ALU_MOVG ; -- <reg>,<imm16>      ; Move data if greater.          (Z == 0 && S == O) (signed)
+	constant OP_MOVLE_I    : t_operation := "0" & ULA & G1_FORMAT & ALU_MOVLE; -- <reg>,<imm16>      ; Move data if less or equal.    (Z == 1 || S != O) (signed)
+	constant OP_MOVGE_I    : t_operation := "0" & ULA & G1_FORMAT & ALU_MOVGE; -- <reg>,<imm16>      ; Move data if greater or equal. (S == O)           (signed)
+	constant OP_MOVL_I     : t_operation := "0" & ULA & G1_FORMAT & ALU_MOVL ; -- <reg>,<imm16>      ; Move data if less.             (S != O)           (signed)
+	constant OP_STORS_I    : t_operation := "0" & ULA & G1_FORMAT & ALU_STORS; --   0  ,<imm16>      ; Store the data into the status register.
+end package isa;
+
+
+		-- procedure print ( signal data: std_logic_vector) is
+		-- 	variable result : string (data'length downto 1) := (others => NUL);
+		-- begin
+		-- 	for i in data'range loop
+		-- 		result(i+1) := std_logic'image(data(i))(2);
+		-- 	end loop;
+
+		-- 	report result;
+		-- end procedure;
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+library work;
+use work.isa.all;
+
+entity register_file is
+	port (
+		reg_a : out t_register;
+		reg_b : out t_register;
+		reg_c : in  t_register;
+
+		idx_a : in t_rindex;
+		idx_b : in t_rindex;
+		idx_c : in t_rindex;
+
+		write : in std_logic;
+		clock : in std_logic
+	);
+end register_file;
+
+architecture behavioral of register_file is
+	signal registers    : t_register_bank;
+	signal idx_buffer   : t_rindex;
+begin
+	process(clock)
+		variable previus_idx : t_rindex;
+	begin
+		if falling_edge(clock) then
+			reg_a <= registers(to_integer(unsigned(idx_a)));
+			reg_b <= registers(to_integer(unsigned(idx_b)));
+
+			if (write = '1') then
+				-- delaying one cycle the port selection to sincronize with the
+				-- ALU execution.
+				previus_idx := idx_buffer;
+				registers(to_integer(unsigned(previus_idx))) <= reg_c;
+
+				-- Bypass the input signal
+				if idx_a = previus_idx then
+					reg_a <= reg_c;
+				end if;
+
+				if idx_b = previus_idx then
+					reg_b <= reg_c;
+				end if;
+			end if;
+
+			idx_buffer <= idx_c;
+		end if;
+	end process;
+end behavioral;
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+library work;
+use work.isa.all;
+
+entity cpu is
+	port (
+		clock        : in std_logic := '0';
+		output       : out t_register;
+		instruction  : in t_instruction
+	);
+end cpu;
+
+architecture behavioral of cpu is
+	component alu
+		port (
+			opcode : in t_opcode;
+			clock  : in std_logic;
+			reg_a  : in t_register;
+			reg_b  : in t_register;
+			reg_c  : out t_register;
+			write  : out std_logic
+		);
+	end component alu;
+
+	component decoder
+		port (
+			clock        : in std_logic;
+			instruction  : in t_instruction;
+			imm_enable   : out std_logic;
+			immediate    : out t_register;
+			idx_a        : out t_rindex;
+			idx_b        : out t_rindex;
+			idx_c        : out t_rindex;
+			opcode       : out t_opcode
+		);
+	end component decoder;
+
+	component register_file
+		port (
+			reg_a : out t_register;
+			reg_b : out t_register;
+			reg_c : in  t_register;
+
+			idx_a : in t_rindex;
+			idx_b : in t_rindex;
+			idx_c : in t_rindex;
+
+			write : in std_logic;
+			clock : in std_logic
+		);
+	end component register_file;
+
+	signal idx_a  : t_rindex;
+	signal idx_b  : t_rindex;
+	signal idx_c  : t_rindex;
+	signal reg_a  : t_register;
+	signal reg_b  : t_register;
+	signal reg_c  : t_register;
+	signal reg_o  : t_register;
+	signal imm    : t_register;
+	signal opcode : t_opcode;
+	signal write  : std_logic;
+	signal imm_enable : std_logic;
+begin
+	decoder_m: decoder port map( clock, instruction, imm_enable, imm, idx_a, idx_b, idx_c, opcode );
+	register_file_m: register_file port map( reg_a, reg_b, reg_c, idx_a, idx_b, idx_c, write, clock );
+	alu_m: alu port map( opcode, clock, reg_a, reg_o, reg_c, write );
+	reg_o <= imm when imm_enable = '1' else reg_b;
+	output <= reg_c;
+end behavioral;
+
+library IEEE;
+use IEEE.std_logic_1164.all;
+use IEEE.numeric_std.all;
+
+library work;
+use work.isa.all;
+
+entity decoder is
+	port (
+		clock        : in std_logic;
+		instruction  : in t_instruction;
+		imm_enable   : out std_logic := '0';
+		immediate    : out t_register := (others => '0');
+		idx_a        : out t_rindex := (others => '0');
+		idx_b        : out t_rindex := (others => '0');
+		idx_c        : out t_rindex := (others => '0');
+		opcode       : out t_opcode := ALU_NOP
+	);
+end decoder;
+
+architecture behavioral of decoder is
+	signal imm_buffer        : t_register := (others => '0');
+	signal imm_enable_buffer : std_logic := '0';
+	signal opcode_buffer     : t_opcode := ALU_NOP;
+
+begin
+	process(clock)
+	begin
+		if rising_edge(clock) then
+			case instruction(INST_GFLAG_RANGE) is
+				when G0_FORMAT =>
+					imm_buffer <= std_logic_vector(resize(signed(instruction(INST_IMM21_RANGE)),imm_buffer'length));
+					imm_enable_buffer <= '1';
+				when G1_FORMAT =>
+					imm_buffer <= std_logic_vector(resize(signed(instruction(INST_IMM16_RANGE)),imm_buffer'length));
+					imm_enable_buffer <= '1';
+				when G2_FORMAT =>
+					imm_buffer <= std_logic_vector(resize(signed(instruction(INST_IMM11_RANGE)),imm_buffer'length));
+					imm_enable_buffer <= '1';
+				when G3_FORMAT =>
+					imm_buffer <= std_logic_vector(resize(signed(instruction(INST_RESE_RANGE)) ,imm_buffer'length));
+					imm_enable_buffer <= '0';
+				when others =>
+					imm_enable_buffer <= '0';
+					imm_buffer <= (others => '0');
+			end case;
+
+			opcode_buffer <= instruction(INST_OPCODE_RANGE);
+			idx_c  <= instruction(INST_REG2_RANGE);
+			idx_b  <= instruction(INST_REG1_RANGE);
+			idx_a  <= instruction(INST_REG0_RANGE);
+		elsif falling_edge(clock) then
+			opcode     <= opcode_buffer;
+			immediate  <= imm_buffer;
+			imm_enable <= imm_enable_buffer;
+		end if;
+	end process;
+end;
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+use ieee.math_real.all;
+
+library work;
+use work.isa.all;
+
+entity alu is
+	port (
+		opcode : in t_opcode := ALU_NOP;
+		clock  : in std_logic := '0';
+		reg_a  : in t_register;
+		reg_b  : in t_register;
+		reg_c  : out t_register;
+		write  : out std_logic
+	);
+end alu;
+
+architecture behavioral of alu is
+	signal status : t_status := (others => '0');
+
+	-- @Description: logical "and".
+	-- @Flags: Z, S, P
+	procedure op_and( variable result : out t_register; signal a, b: in t_register ) is
+	begin
+		result := a and b;
+	end op_and;
+
+	-- @Description: inverted "and" operation.
+	-- @Flags: Z, S, P
+	procedure op_nand( variable result : out t_register; signal a, b: in t_register ) is
+	begin
+		result := a nand b;
+	end op_nand;
+
+	-- @Description: logical inclusive "or".
+	-- @Flags: Z, S, P
+	procedure op_or( variable result : out t_register; signal a, b: in t_register ) is
+	begin
+		result := a or b;
+	end op_or;
+
+	-- @Description: inverted "or" operation.
+	-- @Flags: Z, S, P
+	procedure op_nor( variable result : out t_register; signal a, b: in t_register ) is
+	begin
+		result := a nor b;
+	end op_nor;
+
+	-- @Description: logical "not".
+	-- @Flags: Z, S, P
+	procedure op_not( variable result : out t_register; signal a : in t_register ) is
+	begin
+		result := not a;
+	end op_not;
+
+	-- @Description: logical exclusive "or".
+	-- @Flags: Z, S, P
+	procedure op_xor( variable result : out t_register; signal a, b: in t_register ) is
+	begin
+		result := a xor b;
+	end op_xor;
+
+	-- @Description: inverted exclusive "or".
+	-- @Flags: Z, S, P
+	procedure op_xnor( variable result : out t_register; signal a, b: in t_register ) is
+	begin
+		result := a xnor b;
+	end op_xnor;
+
+	-- @Description: shifts the bits in "a" to left "b" times. The Carry Flag contains the last bit shifted out.
+	-- @Flags: C,Z,S,P
+	procedure op_shl( variable result : out t_register; signal a, b: in t_register; signal status : out t_status ) is
+		variable cache : std_logic_vector (result'length downto 0);
+	begin
+		cache := std_logic_vector(('0' & signed(a)) sll to_integer(resize(unsigned(b),GPR_BASE_LEN + 1)));
+		status(ALU_FLAG_C) <= cache(cache'left);
+		result := cache(result'range);
+	end op_shl;
+
+	-- @Description: shifts the bits in "a" to right "b" times. The Carry Flag contains the last bit shifted out.
+	-- @Flags: C,Z,S,P
+	procedure op_shr( variable result : out t_register; signal a, b: in t_register; signal status : out t_status ) is
+		variable cache : std_logic_vector (result'length downto 0);
+	begin
+		cache := std_logic_vector((signed(a) & '0') srl to_integer(resize(unsigned(b),GPR_BASE_LEN + 1)));
+		status(ALU_FLAG_C) <= cache(cache'right);
+		result := cache(result'length downto 1);
+	end op_shr;
+
+	-- @Description: rotates bits in "a" to the left "b" times. All data pushed out to the left side re-entering on the right side.
+	-- @Flags: Z,S,P
+	procedure op_rol( variable result : out t_register; signal a, b : in t_register ) is
+	begin
+		result := std_logic_vector(signed(a) rol to_integer(resize(unsigned(b),GPR_BASE_LEN + 1)));
+	end op_rol;
+
+	-- @Description: rotates bits in "a" to the right "b" times. All data pushed out to the right side re-entering on the left side.
+	-- @Flags: Z,S,P
+	procedure op_ror( variable result : out t_register; signal a, b: in t_register ) is
+	begin
+		result := std_logic_vector(signed(a) ror to_integer(resize(unsigned(b),GPR_BASE_LEN + 1)));
+	end op_ror;
+
+	-- @Description: two's complement negation (-a).
+	-- @Flags: Z,S,P
+	procedure op_neg( variable result : out t_register; signal a: in t_register ) is
+	begin
+		result := std_logic_vector(unsigned(not(a)) + 1);
+	end op_neg;
+
+	-- @Description: arithmetic addition. (TODO: optimize this procedure.)
+	-- @Flags: O,C,Z,S,P
+	procedure op_add( variable result : out t_register; signal a, b: in t_register; signal status : out t_status ) is
+		variable cache : std_logic_vector (result'length downto 0);
+		variable total : t_register;
+	begin
+		cache := std_logic_vector(resize(unsigned(a),a'length + 1) + resize(unsigned(b),b'length + 1));
+		total := std_logic_vector(resize(unsigned(cache),total'length));
+
+		status(ALU_FLAG_C) <= cache(cache'left);
+		status(ALU_FLAG_O) <= (a(a'left) and b(b'left) and (not(total(total'left)))) or (not(a(a'left)
+					or b(b'left)) and total(total'left));
+
+		result := total;
+	end op_add;
+
+	-- @Description: arithmetic subtraction. (TODO: optimize this procedure to use the add circuit.)
+	-- @Flags: O,C,Z,S,P
+	procedure op_sub( variable result : out t_register; signal a, b: in t_register; signal status : out t_status ) is
+		variable cache : std_logic_vector (result'length downto 0);
+		variable total : t_register;
+	begin
+		cache := std_logic_vector(resize(unsigned(a),a'length + 1) - resize(unsigned(b),b'length + 1));
+		total := std_logic_vector(resize(unsigned(cache),total'length));
+
+		status(ALU_FLAG_C) <= cache(cache'left);
+		status(ALU_FLAG_O) <= (a(a'left) and (not b(b'left)) and (not(total(total'left)))) or (not(a(a'left) or (not b(b'left))) and total(total'left));
+
+		result := total;
+	end op_sub;
+
+	-- @Description: Subtracts a from b and updates the status flags.
+	-- @Flags: C, Z, S, P, O
+	procedure op_cmp( variable result : out t_register; signal a, b: in t_register; signal status : out t_status; variable wflag : out std_logic ) is
+	begin
+		op_sub( result, a, b, status ); wflag := '0';
+	end op_cmp;
+
+	-- @Description: halfword arithmetic signed multiplication.
+	-- @Flags: Z, S, P
+	procedure op_mul( variable result : out t_register; signal a : in t_register; signal b : in t_register; signal status : out t_status ) is
+	begin
+		result := std_logic_vector(resize(signed(a),GPR_HALF_WORD) * resize(signed(b),GPR_HALF_WORD));
+	end op_mul;
+
+	-- @Description: halfword arithmetic unsigned multiplication.
+	-- @Flags: Z, S, P
+	procedure op_mulu( variable result : out t_register; signal a : in t_register; signal b : in t_register; signal status : out t_status ) is
+	begin
+		result := std_logic_vector(resize(unsigned(a),GPR_HALF_WORD) * resize(unsigned(b),GPR_HALF_WORD));
+	end op_mulu;
+
+	-- @Description: arithmetic signed division.
+	-- @Flags: Z, S, P
+	procedure op_div( variable result : out t_register; signal a : in t_register; signal b : in t_register ) is
+	begin
+		result := std_logic_vector(signed(a) / signed(b));
+	end op_div;
+
+	-- @Description: arithmetic unsigned division.
+	-- @Flags: Z, S, P
+	procedure op_divu( variable result : out t_register; signal a : in t_register; signal b : in t_register ) is
+	begin
+		result := std_logic_vector(unsigned(a) / unsigned(b));
+	end op_divu;
+
+	procedure op_mod( variable result : out t_register; signal a : in t_register; signal b : in t_register ) is
+	begin
+		result := std_logic_vector(unsigned(a) rem unsigned(b));
+	end op_mod;
+
+	procedure op_abs( variable result : out t_register; signal b : in t_register ) is
+	begin
+		result := std_logic_vector(abs signed(b));
+	end op_abs;
+
+	procedure op_mov( variable result : out t_register; signal b : in t_register ) is
+	begin
+		result := b;
+	end op_mov;
+
+	procedure op_move( variable result : out t_register; signal b : in t_register; signal status : in t_status; variable wflag : out std_logic ) is
+	begin
+		result := b; wflag := status(ALU_FLAG_Z);
+	end op_move;
+
+	procedure op_movne( variable result : out t_register; signal b : in t_register; signal status : in t_status; variable wflag : out std_logic ) is
+	begin
+		result := b; wflag := not status(ALU_FLAG_Z);
+	end op_movne;
+
+	procedure op_movs( variable result : out t_register; signal b : in t_register; signal status : in t_status; variable wflag : out std_logic ) is
+	begin
+		result := b; wflag := status(ALU_FLAG_S);
+	end op_movs;
+
+	procedure op_movns( variable result : out t_register; signal b : in t_register; signal status : in t_status; variable wflag : out std_logic ) is
+	begin
+		result := b; wflag := not status(ALU_FLAG_S);
+	end op_movns;
+
+	procedure op_movo( variable result : out t_register; signal b : in t_register; signal status : in t_status; variable wflag : out std_logic ) is
+	begin
+		result := b; wflag := status(ALU_FLAG_O);
+	end op_movo;
+
+	procedure op_movno( variable result : out t_register; signal b : in t_register; signal status : in t_status; variable wflag : out std_logic ) is
+	begin
+		result := b; wflag := not status(ALU_FLAG_O);
+	end op_movno;
+
+	procedure op_movp( variable result : out t_register; signal b : in t_register; signal status : in t_status; variable wflag : out std_logic ) is
+	begin
+		result := b; wflag := status(ALU_FLAG_P);
+	end op_movp;
+
+	procedure op_movnp( variable result : out t_register; signal b : in t_register; signal status : in t_status; variable wflag : out std_logic ) is
+	begin
+		result := b; wflag := not status(ALU_FLAG_P);
+	end op_movnp;
+
+	procedure op_mova( variable result : out t_register; signal b : in t_register; signal status : in t_status; variable wflag : out std_logic ) is
+	begin
+		result := b; wflag := (not status(ALU_FLAG_C)) and (not status(ALU_FLAG_Z));
+	end op_mova;
+
+	procedure op_movbe( variable result : out t_register; signal b : in t_register; signal status : in t_status; variable wflag : out std_logic ) is
+	begin
+		result := b; wflag := status(ALU_FLAG_C) or status(ALU_FLAG_Z);
+	end op_movbe;
+
+	procedure op_movae( variable result : out t_register; signal b : in t_register; signal status : in t_status; variable wflag : out std_logic ) is
+	begin
+		result := b; wflag := not status(ALU_FLAG_C);
+	end op_movae;
+
+	procedure op_movb( variable result : out t_register; signal b : in t_register; signal status : in t_status; variable wflag : out std_logic ) is
+	begin
+		result := b; wflag := status(ALU_FLAG_C);
+	end op_movb;
+
+	procedure op_movg( variable result : out t_register; signal b : in t_register; signal status : in t_status; variable wflag : out std_logic ) is
+	begin
+		result := b; wflag := (not status(ALU_FLAG_Z)) and (status(ALU_FLAG_S) xnor status(ALU_FLAG_O));
+	end op_movg;
+
+	procedure op_movle( variable result : out t_register; signal b : in t_register; signal status : in t_status; variable wflag : out std_logic ) is
+	begin
+		result := b; wflag := status(ALU_FLAG_Z) or (status(ALU_FLAG_S) xor status(ALU_FLAG_O));
+	end op_movle;
+
+	procedure op_movge( variable result : out t_register; signal b : in t_register; signal status : in t_status; variable wflag : out std_logic ) is
+	begin
+		result := b; wflag := status(ALU_FLAG_O) xnor status(ALU_FLAG_S);
+	end op_movge;
+
+	procedure op_movl( variable result : out t_register; signal b : in t_register; signal status : in t_status; variable wflag : out std_logic ) is
+	begin
+		result := b; wflag := status(ALU_FLAG_S) xor status(ALU_FLAG_O);
+	end op_movl;
+
+	procedure op_loads( variable result : out t_register; signal status : in t_status ) is
+	begin
+		result := std_logic_vector(resize(unsigned(status), result'length));
+	end op_loads;
+
+	procedure op_stors( variable result : out t_register; signal a : in t_register; signal status : out t_status; variable wflag : out std_logic ) is
+	begin
+		status <= std_logic_vector(resize(unsigned(a), status'length)); wflag  := '0';
+	end op_stors;
+begin
+	process(clock)
+		variable result : t_register;
+		variable wflag  : std_logic;
+
+		procedure print ( signal data: std_logic_vector) is
+			variable result : string (data'length downto 1) := (others => NUL);
+		begin
+			for i in data'range loop
+				result(i+1) := std_logic'image(data(i))(2);
+			end loop;
+
+			report result;
+		end procedure;
+
+	begin
+		if rising_edge(clock) then
+			wflag  := '1';
+
+			print(reg_a);
+			print(reg_b);
+			print(opcode);
+			case opcode is
+				when ALU_CMP   => op_cmp   ( result, reg_a, reg_b, status, wflag );
+				when ALU_AND   => op_and   ( result, reg_a, reg_b );
+				when ALU_NAND  => op_nand  ( result, reg_a, reg_b );
+				when ALU_OR    => op_or    ( result, reg_a, reg_b );
+				when ALU_NOR   => op_nor   ( result, reg_a, reg_b );
+				when ALU_NOT   => op_not   ( result,        reg_b );
+				when ALU_XOR   => op_xor   ( result, reg_a, reg_b );
+				when ALU_XNOR  => op_xnor  ( result, reg_a, reg_b );
+				when ALU_SHL   => op_shl   ( result, reg_a, reg_b, status );
+				when ALU_SHR   => op_shr   ( result, reg_a, reg_b, status );
+				when ALU_ROL   => op_rol   ( result, reg_a, reg_b );
+				when ALU_ROR   => op_ror   ( result, reg_a, reg_b );
+				when ALU_NEG   => op_neg   ( result,        reg_b );
+				when ALU_ADD   => op_add   ( result, reg_a, reg_b, status );
+				when ALU_SUB   => op_sub   ( result, reg_a, reg_b, status );
+				when ALU_MUL   => op_mul   ( result, reg_a, reg_b, status );
+				when ALU_MULU  => op_mulu  ( result, reg_a, reg_b, status );
+				when ALU_DIV   => op_div   ( result, reg_a, reg_b );
+				when ALU_DIVU  => op_divu  ( result, reg_a, reg_b );
+				when ALU_MOD   => op_mod   ( result, reg_a, reg_b );
+				when ALU_ABS   => op_abs   ( result,        reg_b );
+				when ALU_MOV   => op_mov   ( result,        reg_b );
+				when ALU_MOVE  => op_move  ( result,        reg_b, status, wflag );
+				when ALU_MOVNE => op_movne ( result,        reg_b, status, wflag );
+				when ALU_MOVS  => op_movs  ( result,        reg_b, status, wflag );
+				when ALU_MOVNS => op_movns ( result,        reg_b, status, wflag );
+				when ALU_MOVO  => op_movo  ( result,        reg_b, status, wflag );
+				when ALU_MOVNO => op_movno ( result,        reg_b, status, wflag );
+				when ALU_MOVP  => op_movp  ( result,        reg_b, status, wflag );
+				when ALU_MOVNP => op_movnp ( result,        reg_b, status, wflag );
+				when ALU_MOVA  => op_mova  ( result,        reg_b, status, wflag );
+				when ALU_MOVBE => op_movbe ( result,        reg_b, status, wflag );
+				when ALU_MOVAE => op_movae ( result,        reg_b, status, wflag );
+				when ALU_MOVB  => op_movb  ( result,        reg_b, status, wflag );
+				when ALU_MOVG  => op_movg  ( result,        reg_b, status, wflag );
+				when ALU_MOVLE => op_movle ( result,        reg_b, status, wflag );
+				when ALU_MOVGE => op_movge ( result,        reg_b, status, wflag );
+				when ALU_MOVL  => op_movl  ( result,        reg_b, status, wflag );
+				when ALU_LOADS => op_loads ( result,               status );
+				when ALU_STORS => op_stors ( result,        reg_b, status, wflag );
+				when others => result := (others => '0'); wflag := '0';
+			end case;
+
+			if ((opcode /= ALU_LOADS) and (wflag = '1')) or (opcode = ALU_CMP) then
+				if result = (result'range => '0') then
+					status(ALU_FLAG_Z) <= '1';
+				else
+					status(ALU_FLAG_Z) <= '0';
+				end if;
+
+				status(ALU_FLAG_S) <= result(result'left);
+				status(ALU_FLAG_P) <= not(result(result'right));
+			end if;
+
+			if wflag = '1' then
+				reg_c <= result;
+			else
+				reg_c <= ZERO;
+			end if;
+
+			write <= wflag;
+		end if;
+	end process;
+end behavioral;
+
+library ieee;
+use ieee.std_logic_1164.all;
+
+library work;
+use work.isa.all;
+
+entity cpu_test is
+	port(
+		clock    : in std_logic;
+		input    : in std_logic_vector(7 downto 0);
+		bt_next  : in std_logic;
+		bt_clock : in std_logic;
+		output   : out std_logic_vector(7 downto 0);
+		leds     : out std_logic_vector(7 downto 0);
+		display  : out std_logic_vector(3 downto 0)
+	);
+end cpu_test;
+
+architecture hardware of cpu_test is
+	signal byte0 : std_logic_vector(7 downto 0) := "11111111";
+	signal byte1 : std_logic_vector(7 downto 0) := "11111111";
+	signal byte2 : std_logic_vector(7 downto 0) := "11111111";
+	signal byte3 : std_logic_vector(7 downto 0) := "11111111";
+	signal curr  : std_logic_vector(3 downto 0) := "0000";
+	signal cpu_clk : std_logic := '0';
+	
+	component cpu is
+		port (
+			clock        : in std_logic := '0';
+			output       : out t_register;
+			instruction  : in t_instruction
+		);
+	end component cpu;
+	
+	function getDisplayValue ( signal data : in std_logic_vector(3 downto 0)) return std_logic_vector is
+	begin
+		case data is
+			when "0000" => return "00111111";
+			when "0001" => return "00000110";
+			when "0010" => return "01011011";
+			when "0011" => return "01001111";
+			when "0100" => return "01100110";
+			when "0101" => return "01101101";
+			when "0110" => return "01111101";
+			when "0111" => return "00000111";
+			when "1000" => return "01111111";
+			when "1001" => return "01101111";
+			when "1010" => return "01110111";
+			when "1011" => return "01111111";
+			when "1100" => return "00111001";
+			when "1101" => return "00111111";
+			when "1110" => return "01111001";
+			when "1111" => return "01110001";
+			when others => return "10000000";
+		end case;
+	end;
+begin
+	cpu_m : cpu port map(cpu_clk, leds(7 downto 0), byte0 & byte1 & byte2 & byte3);
+
+	process(clock)
+		variable i : integer := 0;
+		variable btn_pressed : std_logic := '0';
+		variable btc_pressed : std_logic := '0';
+	begin
+		if (rising_edge(clock)) then
+			if ( i > 750000 ) then
+				i := 0;
+				
+				if ( bt_next = '1' ) then
+					btn_pressed := '1';
+				elsif ( btn_pressed = '1' ) then
+					case ( curr ) is
+						when "0000" =>
+							curr  <= "0001";
+							byte0 <= input;
+						when "0001" =>
+							curr  <= "0010";
+							byte1 <= input;
+						when "0010" =>
+							curr  <= "0011";
+							byte2 <= input;
+						when "0011" =>
+							curr  <= "0000";
+							byte3 <= input;
+						when others => curr <= "0000";
+					end case;
+					
+					btn_pressed := '0';
+				end if;
+				
+				if ( bt_clock = '1' ) then
+					btc_pressed := '1';
+				elsif ( btc_pressed = '1' ) then
+					cpu_clk <= '1';
+					btc_pressed := '0';
+				end if;
+			elsif ( i = 250000 ) then
+				cpu_clk <= '0';
+				display <= "1000";
+				output <= getDisplayValue(input(3 downto 0));
+			elsif ( i = 500000 ) then
+				display <= "0100";
+				output <= getDisplayValue(input(7 downto 4));
+			elsif ( i = 750000 ) then
+				display <= "0001";
+				output <= getDisplayValue(curr);
+			end if;
+
+			i := i + 1;
+		end if;
+	end process;
+end hardware;
